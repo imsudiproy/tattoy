@@ -78,6 +78,16 @@ pub(crate) fn start_tattoys(
                 ));
             }
 
+            if enabled_tattoys.contains(&"animated_cursor".to_owned())
+                || state.config.read().await.animated_cursor.enabled
+            {
+                tracing::info!("Starting 'animated_cursor' tattoy...");
+                tattoy_futures.spawn(crate::tattoys::animated_cursor::AnimatedCursor::start(
+                    output.clone(),
+                    Arc::clone(&state),
+                ));
+            }
+
             if enabled_tattoys.contains(&"bg_command".to_owned())
                 || state.config.read().await.bg_command.enabled
             {

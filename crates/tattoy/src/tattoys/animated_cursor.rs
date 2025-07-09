@@ -1,16 +1,14 @@
-//! Shadertoy-like shaders. You should be able to copy and paste most shaders found on
-//! <https://shadertoy.com>.
+//! Animate the cursor using shaders.
 
 use color_eyre::eyre::{ContextCompat as _, Result};
 use futures_util::FutureExt as _;
 
 use crate::tattoys::tattoyer::Tattoyer;
 
+/// The size of the cursor in units of terminal UTF8 half blocl "pixels".
+pub const CURSOR_DIMENSIONS_REAL: (f32, f32) = (1.0, 2.0);
+
 /// All the user config for the shader tattoy.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "We need the bools for the config"
-)]
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(default)]
 pub(crate) struct Config {
@@ -22,17 +20,9 @@ pub(crate) struct Config {
     pub opacity: f32,
     /// The layer (or z-index) into which the shaders are rendered.
     pub layer: i16,
-    /// The shader is still sent and run on the GPU but it's not rendered to a layer on the
-    /// terminal. This is most likely useful in conjunction with `render_shader_colours_to_text`,
-    /// as "contents" of the shader are rendered via the terminal's text.
-    pub render: bool,
     /// Whether to upload a pixel representation of the user's terminal. Useful for shader's that
     /// replace the text of the terminal, as Ghostty shaders do.
     pub upload_tty_as_pixels: bool,
-    /// Define the terminal's text colours based on the colour of the shader pixel at the same
-    /// position. This would most likely be used in conjunction with auto contrast enabled,
-    /// otherwise the text won't actually be readable.
-    pub render_shader_colours_to_text: bool,
 }
 
 impl Default for Config {
@@ -41,47 +31,51 @@ impl Default for Config {
             enabled: false,
             path: format!(
                 "{}/{}",
-                crate::config::main::SHADER_DIRECTORY_NAME,
-                crate::config::main::DEFAULT_SHADER_FILENAME
+                crate::config::main::CURSOR_SHADER_DIRECTORY_NAME,
+                crate::config::main::DEFAULT_CURSOR_SHADER_FILENAME
             )
             .into(),
             opacity: 0.75,
-            layer: -10,
-            render: true,
-            upload_tty_as_pixels: true,
-            render_shader_colours_to_text: false,
+            layer: -1,
+            upload_tty_as_pixels: false,
         }
     }
 }
 
-/// `Shaders`
-pub(crate) struct Shaders<'shaders> {
+/// `AnimatedCursor`
+pub(crate) struct AnimatedCursor<'shaders> {
     /// The base Tattoy struct
     tattoy: Tattoyer,
     /// All the special GPU handling code.
     gpu: super::gpu::pipeline::GPU<'shaders>,
 }
 
-impl Shaders<'_> {
+impl AnimatedCursor<'_> {
     /// Instantiate
     async fn new(
         output_channel: tokio::sync::mpsc::Sender<crate::run::FrameUpdate>,
         state: std::sync::Arc<crate::shared_state::SharedState>,
     ) -> Result<Self> {
-        let config_directory = state.config_path.read().await.clone();
-        let shader_path = state.config.read().await.shader.path.clone();
+        let shader_directory = state.config_path.read().await.clone();
+        let shader_path = state.config.read().await.animated_cursor.path.clone();
         let tty_size = *state.tty_size.read().await;
         let gpu = super::gpu::pipeline::GPU::new(
-            config_directory.join(shader_path),
+            shader_directory.join(shader_path),
             tty_size.width,
             tty_size.height * 2,
             state.protocol_tx.clone(),
         )
         .await?;
-        let layer = state.config.read().await.shader.layer;
-        let opacity = state.config.read().await.shader.opacity;
-        let tattoy =
-            Tattoyer::new("shader".to_owned(), state, layer, opacity, output_channel).await;
+        let layer = state.config.read().await.animated_cursor.layer;
+        let opacity = state.config.read().await.animated_cursor.opacity;
+        let tattoy = Tattoyer::new(
+            "animated_cursor".to_owned(),
+            state,
+            layer,
+            opacity,
+            output_channel,
+        )
+        .await;
         Ok(Self { tattoy, gpu })
     }
 
@@ -138,7 +132,7 @@ impl Shaders<'_> {
         state: &std::sync::Arc<crate::shared_state::SharedState>,
     ) -> Result<()> {
         let mut protocol = state.protocol_tx.subscribe();
-        let mut shader = Self::new(output, std::sync::Arc::clone(state)).await?;
+        let mut animated_cursor = Self::new(output, std::sync::Arc::clone(state)).await?;
 
         #[expect(
             clippy::integer_division_remainder_used,
@@ -146,14 +140,14 @@ impl Shaders<'_> {
         )]
         loop {
             tokio::select! {
-                () = shader.tattoy.sleep_until_next_frame_tick() => {
-                    shader.render().await?;
+                () = animated_cursor.tattoy.sleep_until_next_frame_tick() => {
+                    animated_cursor.render().await?;
                 },
                 result = protocol.recv() => {
                     if matches!(result, Ok(crate::run::Protocol::End)) {
                         break;
                     }
-                    shader.handle_protocol_message(result).await?;
+                    animated_cursor.handle_protocol_message(result).await?;
                 }
             }
         }
@@ -192,7 +186,7 @@ impl Shaders<'_> {
             .config
             .read()
             .await
-            .shader
+            .animated_cursor
             .upload_tty_as_pixels;
         let image = self
             .tattoy
@@ -208,9 +202,18 @@ impl Shaders<'_> {
         self.gpu
             .update_cursor_position(cursor.0.try_into()?, cursor.1.try_into()?);
 
+        let config = self
+            .tattoy
+            .state
+            .config
+            .read()
+            .await
+            .animated_cursor
+            .clone();
         self.tattoy.initialise_surface();
-        self.tattoy.opacity = self.tattoy.state.config.read().await.shader.opacity;
-        self.tattoy.layer = self.tattoy.state.config.read().await.shader.layer;
+        self.tattoy.opacity = config.opacity;
+        self.tattoy.layer = config.layer;
+
         let image = self.gpu.render().await?;
 
         let tty_height_in_pixels = u32::from(self.tattoy.height) * 2;
@@ -222,7 +225,6 @@ impl Shaders<'_> {
                     .get_pixel_checked(x.into(), y_reversed)
                     .context(format!("Couldn't get pixel: {x}x{y_reversed}"))?
                     .0;
-
                 self.tattoy
                     .surface
                     .add_pixel(x.into(), y.try_into()?, pixel.into())?;
