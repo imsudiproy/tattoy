@@ -3,6 +3,9 @@
 use color_eyre::eyre::{ContextCompat as _, Result};
 use wgpu::util::DeviceExt as _;
 
+/// The byte width of an `Rgba8UnormSrgb` pixel.
+const RGBA8_BYTES_PER_PIXEL: u32 = 4;
+
 /// Common variables used by Shadertoy shaders.
 #[expect(
     non_snake_case,
@@ -129,10 +132,8 @@ impl GPU {
         let output_texture_descriptor =
             Self::output_texture_descriptor(width.into(), height.into());
         let output_texture = device.create_texture(&output_texture_descriptor);
-        let output_buffer = device.create_buffer(&Self::output_buffer_descriptor(
-            width.into(),
-            height.into(),
-        )?);
+        let output_buffer =
+            device.create_buffer(&Self::output_buffer_descriptor(width.into(), height.into()));
 
         let variables_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
@@ -175,13 +176,11 @@ impl GPU {
 
     /// The output texture descriptor.
     fn output_texture_descriptor(width: u32, height: u32) -> wgpu::TextureDescriptor<'static> {
-        let aligned_width = Self::align_dimension(width);
-        let aligned_height = Self::align_dimension(height);
-        tracing::debug!("Resizing output texture: {aligned_width}x{aligned_height}");
+        tracing::debug!("Resizing output texture: {width}x{height}");
         wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
-                width: aligned_width,
-                height: Self::align_dimension(height),
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -195,32 +194,21 @@ impl GPU {
     }
 
     /// The output buffer descriptor.
-    fn output_buffer_descriptor(
-        width: u32,
-        height: u32,
-    ) -> Result<wgpu::BufferDescriptor<'static>> {
-        let output_buffer_size: wgpu::BufferAddress =
-            (Self::u32_size()? * Self::align_dimension(width) * Self::align_dimension(height))
-                .into();
-        Ok(wgpu::BufferDescriptor {
+    fn output_buffer_descriptor(width: u32, height: u32) -> wgpu::BufferDescriptor<'static> {
+        let output_buffer_size = wgpu::BufferAddress::from(Self::padded_bytes_per_row(width))
+            * wgpu::BufferAddress::from(height);
+        wgpu::BufferDescriptor {
             size: output_buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             label: None,
             mapped_at_creation: false,
-        })
+        }
     }
 
-    /// Align a buffer or texture dimension to a consistent multiple.
-    #[expect(
-        clippy::unwrap_used,
-        reason = "
-           `checked_div()` only returns `None` when the right-hand side is 0, which is clearly
-           impossible here.
-        "
-    )]
-    const fn align_dimension(number: u32) -> u32 {
-        let multiple = 256;
-        (number.checked_div(multiple).unwrap() * multiple) + multiple
+    /// Get the padded row pitch required for copying texture bytes into a buffer.
+    const fn padded_bytes_per_row(width: u32) -> u32 {
+        let unpadded_bytes_per_row = width * RGBA8_BYTES_PER_PIXEL;
+        unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
     }
 
     /// Create the bind group layout that defines where the various shader data is located.
@@ -366,11 +354,6 @@ impl GPU {
         (width, height)
     }
 
-    /// Needed for GPU buffers and such.
-    fn u32_size() -> Result<u32> {
-        Ok(std::mem::size_of::<u32>().try_into()?)
-    }
-
     /// Rebuild the output texture and buffer.
     fn rebuild_output_buffer(&mut self) -> Result<()> {
         let image_size = self.get_image_size();
@@ -380,7 +363,7 @@ impl GPU {
         self.output_buffer = self.device.create_buffer(&Self::output_buffer_descriptor(
             image_size.0.into(),
             image_size.1.into(),
-        )?);
+        ));
         Ok(())
     }
 
@@ -518,8 +501,8 @@ impl GPU {
         }
 
         let image_size = self.get_image_size();
-        let aligned_width = Self::align_dimension(image_size.0.into());
-        let aligned_height = Self::align_dimension(image_size.1.into());
+        let width = u32::from(image_size.0);
+        let height = u32::from(image_size.1);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 aspect: wgpu::TextureAspect::All,
@@ -531,13 +514,13 @@ impl GPU {
                 buffer: &self.output_buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(Self::u32_size()? * aligned_width),
-                    rows_per_image: Some(aligned_height),
+                    bytes_per_row: Some(Self::padded_bytes_per_row(width)),
+                    rows_per_image: Some(height),
                 },
             },
             wgpu::Extent3d {
-                width: aligned_width,
-                height: aligned_height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
@@ -566,33 +549,37 @@ impl GPU {
         rx.await??;
 
         let image_size = self.get_image_size();
-        let aligned_width = Self::align_dimension(image_size.0.into());
-        let aligned_height = Self::align_dimension(image_size.1.into());
-        let raw_image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-            aligned_width,
-            aligned_height,
-            buffer_slice.get_mapped_range(),
-        )
-        .context("Couldn't convert raw GPU buffer to image")?;
+        let width = u32::from(image_size.0);
+        let unpadded_bytes_per_row = usize::try_from(width * RGBA8_BYTES_PER_PIXEL)?;
+        let padded_bytes_per_row = usize::try_from(Self::padded_bytes_per_row(width))?;
+        let raw_image = buffer_slice.get_mapped_range();
 
-        Ok(self.extract_rgba_image(&raw_image))
+        self.extract_rgba_image(&raw_image, unpadded_bytes_per_row, padded_bytes_per_row)
     }
 
-    /// Convert the raw GPU image to more friendly RGB floating point pixels.
+    /// Convert the padded GPU buffer into a tightly packed RGBA image.
     fn extract_rgba_image(
         &self,
-        imaged: &image::ImageBuffer<image::Rgba<u8>, wgpu::BufferView<'_>>,
-    ) -> image::ImageBuffer<image::Rgba<u8>, Vec<u8>> {
+        raw_image: &[u8],
+        unpadded_bytes_per_row: usize,
+        padded_bytes_per_row: usize,
+    ) -> Result<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
         let image_size = self.get_image_size();
+        let height = usize::from(image_size.1);
+        let image_len = unpadded_bytes_per_row
+            .checked_mul(height)
+            .context("Couldn't calculate GPU image buffer size")?;
+        let mut pixels = Vec::with_capacity(image_len);
 
-        image::RgbaImage::from_fn(image_size.0.into(), image_size.1.into(), |x, y| {
-            if let Some(pixel) = imaged.get_pixel_checked(x, y) {
-                [pixel[0], pixel[1], pixel[2], pixel[3]].into()
-            } else {
-                // This should never happen
-                [0, 0, 0, 0].into()
-            }
-        })
+        for row in raw_image.chunks(padded_bytes_per_row).take(height) {
+            let row_pixels = row
+                .get(..unpadded_bytes_per_row)
+                .context("Couldn't extract GPU image row")?;
+            pixels.extend_from_slice(row_pixels);
+        }
+
+        image::RgbaImage::from_raw(image_size.0.into(), image_size.1.into(), pixels)
+            .context("Couldn't convert raw GPU buffer to image")
     }
 
     /// Complile the GLSL shaders ready for consumption by the GPU.
