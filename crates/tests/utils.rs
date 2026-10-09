@@ -32,6 +32,14 @@ pub fn tattoy_binary_path() -> String {
 pub async fn start_tattoy(
     maybe_config_path: Option<String>,
 ) -> (SteppableTerminal, tempfile::TempDir) {
+    start_tattoy_with_size(maybe_config_path, 50, 10).await
+}
+
+pub async fn start_tattoy_with_size(
+    maybe_config_path: Option<String>,
+    width: u16,
+    height: u16,
+) -> (SteppableTerminal, tempfile::TempDir) {
     let shell = shadow_terminal::tests::helpers::get_canonical_shell();
 
     let prompt = "tattoy $ ";
@@ -39,8 +47,8 @@ pub async fn start_tattoy(
     let temp_dir = tempfile::tempdir().unwrap();
 
     let config = shadow_terminal::shadow_terminal::Config {
-        width: 50,
-        height: 10,
+        width,
+        height,
         command: shell.clone(),
         ..shadow_terminal::shadow_terminal::Config::default()
     };

@@ -164,7 +164,7 @@ pub(crate) trait Shaderer: Sized {
     ) -> Result<()> {
         match protocol_result {
             Ok(message) => {
-                if matches!(&message, crate::run::Protocol::Repaint) {
+                if matches!(&message, crate::run::Protocol::Repaint | crate::run::Protocol::Resize { width: _, height: _ }) {
                     self.upload_tty_as_pixels().await?;
                     self.handle_render_hash(HashedRender::NeedsRendering);
                 }
@@ -234,42 +234,67 @@ pub(crate) trait Shaderer: Sized {
 
         let mut hashable_render = Vec::new();
         let is_upload_tty_as_pixels = self.is_upload_tty_as_pixels().await;
+        let is_should_hash = self.is_should_hash_render();
 
+        let tty_width = self.tattoy().width;
         let tty_height_in_pixels = u32::from(self.tattoy().height) * 2;
-        for y in 0..tty_height_in_pixels {
-            for x in 0..self.tattoy().width {
+
+        let mut changed_pixels = Vec::new();
+
+        if is_upload_tty_as_pixels {
+            let tty_pixels = &self.gpu().tty_pixels;
+            for y in 0..tty_height_in_pixels {
                 let offset_for_reversal = 1;
                 let y_reversed = tty_height_in_pixels - y - offset_for_reversal;
 
-                let pixel_u8 = rendered_pixels
-                    .get_pixel_checked(x.into(), y_reversed)
-                    .context(format!("Couldn't get new pixel: {x}x{y_reversed}"))?
-                    .0;
-                let pixel = [
-                    f32::from(pixel_u8[0]) / 255.0,
-                    f32::from(pixel_u8[1]) / 255.0,
-                    f32::from(pixel_u8[2]) / 255.0,
-                    f32::from(pixel_u8[3]) / 255.0,
-                ];
+                for x in 0..tty_width {
+                    let x_u32 = u32::from(x);
+                    let pixel_u8 = rendered_pixels.get_pixel(x_u32, y_reversed).0;
 
-                if is_upload_tty_as_pixels {
-                    if self.are_pixels_different(x.into(), y_reversed, pixel_u8)? {
-                        if self.is_should_hash_render() {
-                            hashable_render.extend(
-                                Self::convert_pixel_to_binary(x, y_reversed, pixel_u8).to_vec(),
-                            );
-                        }
-                        self.tattoy_mut().surface.add_pixel(
-                            x.into(),
-                            y.try_into()?,
-                            pixel.into(),
-                        )?;
+                    if pixel_u8 != tty_pixels.get_pixel(x_u32, y_reversed).0 {
+                        changed_pixels.push((x, y, y_reversed, pixel_u8));
                     }
-                } else {
-                    self.tattoy_mut()
-                        .surface
-                        .add_pixel(x.into(), y.try_into()?, pixel.into())?;
                 }
+            }
+        } else {
+            for y in 0..tty_height_in_pixels {
+                let offset_for_reversal = 1;
+                let y_reversed = tty_height_in_pixels - y - offset_for_reversal;
+
+                for x in 0..tty_width {
+                    let x_u32 = u32::from(x);
+                    let pixel_u8 = rendered_pixels.get_pixel(x_u32, y_reversed).0;
+                    changed_pixels.push((x, y, y_reversed, pixel_u8));
+                }
+            }
+        }
+
+        if is_should_hash {
+            for &(x, _, y_reversed, pixel_u8) in &changed_pixels {
+                hashable_render.extend_from_slice(
+                    &Self::convert_pixel_to_binary(x, y_reversed, pixel_u8),
+                );
+            }
+        }
+
+        let mut surface_cells = self.tattoy_mut().surface.surface.screen_cells();
+        for (x, y, _, pixel_u8) in changed_pixels {
+            let y_usize = usize::try_from(y)?;
+            let row = y_usize.div_euclid(2);
+            let pixel = [
+                f32::from(pixel_u8[0]) / 255.0,
+                f32::from(pixel_u8[1]) / 255.0,
+                f32::from(pixel_u8[2]) / 255.0,
+                f32::from(pixel_u8[3]) / 255.0,
+            ];
+            let colour_attribute =
+                crate::surface::Surface::make_colour_attribute(pixel.into());
+
+            if let Some(cell) = surface_cells
+                .get_mut(row)
+                .and_then(|line| line.get_mut(usize::from(x)))
+            {
+                crate::surface::Surface::set_pixel_in_cell(cell, y_usize, colour_attribute);
             }
         }
 
@@ -302,17 +327,6 @@ pub(crate) trait Shaderer: Sized {
             pixel[2],
             pixel[3],
         ]
-    }
-
-    /// Compare the pixel before and after rendering.
-    fn are_pixels_different(&self, x: u32, y_reversed: u32, new_pixel: [u8; 4]) -> Result<bool> {
-        let old_pixel = self
-            .gpu()
-            .tty_pixels
-            .get_pixel_checked(x, y_reversed)
-            .context(format!("Couldn't get old pixel: {x}x{y_reversed}"))?
-            .0;
-        Ok(new_pixel != old_pixel)
     }
 
     /// Get the current colour of the cursor.

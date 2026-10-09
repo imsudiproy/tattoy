@@ -1,7 +1,6 @@
 //! Add pixels and or characters to a tattoy surface
 
 use color_eyre::eyre::bail;
-use color_eyre::eyre::ContextCompat as _;
 use color_eyre::eyre::Result;
 
 use shadow_terminal::termwiz;
@@ -53,25 +52,12 @@ impl Surface {
         }
     }
 
-    /// Add a pixel ("▀", "▄") to a tattoy surface.
-    ///
-    /// The rule is that we default to rendering any pair of colours using the upper half block.
-    /// Therefore that the upper "pixel" is rendered with the cell's foreground and the lower
-    /// "pixel" is rendered with the cell's background colour.
-    ///
-    /// However, there is one edge case that requires this to be inverted: when an empty cell
-    /// needs a pixel in the lower half. It is impossible to do this with an upper half block
-    /// *whilst retaining the ANSI-coded default background colour*.
-    pub fn add_pixel(&mut self, x: usize, y: usize, colour: Colour) -> Result<()> {
-        let (col, row) = self.coords_to_tty(x, y)?;
-        let colour_attribute = Self::make_colour_attribute(colour);
-
-        let mut cells = self.surface.screen_cells();
-        let cell = cells
-            .get_mut(row)
-            .context("No cell row")?
-            .get_mut(col)
-            .context("No cell column")?;
+    /// Set pixel in an individual cell.
+    pub fn set_pixel_in_cell(
+        cell: &mut termwiz::cell::Cell,
+        y: usize,
+        colour_attribute: termwiz::color::ColorAttribute,
+    ) {
         let is_empty_upper = cell.str() != "▀";
         let is_upper_half = y.rem_euclid(2) == 0;
         let is_lower_half = !is_upper_half;
@@ -82,8 +68,6 @@ impl Surface {
         } else {
             '▀'
         };
-        // TODO: It'd be nice to add a method to `termwiz::cell::Cell` that allowed setting the
-        // cell's text value. It would save this little scratch and clone dance.
         let mut scratch = termwiz::cell::Cell::new(text, cell.attrs().clone());
 
         let mut is_set_foreground_colour = is_upper_half;
@@ -117,6 +101,29 @@ impl Surface {
         }
 
         *cell = scratch;
+    }
+
+    /// Add a pixel ("▀", "▄") to a tattoy surface.
+    ///
+    /// The rule is that we default to rendering any pair of colours using the upper half block.
+    /// Therefore that the upper "pixel" is rendered with the cell's foreground and the lower
+    /// "pixel" is rendered with the cell's background colour.
+    ///
+    /// However, there is one edge case that requires this to be inverted: when an empty cell
+    /// needs a pixel in the lower half. It is impossible to do this with an upper half block
+    /// *whilst retaining the ANSI-coded default background colour*.
+    pub fn add_pixel(&mut self, x: usize, y: usize, colour: Colour) -> Result<()> {
+        let (col, row) = self.coords_to_tty(x, y)?;
+        let colour_attribute = Self::make_colour_attribute(colour);
+
+        let mut cells = self.surface.screen_cells();
+        let cell = cells
+            .get_mut(row)
+            .ok_or_else(|| color_eyre::eyre::eyre!("No cell row: {row}"))?
+            .get_mut(col)
+            .ok_or_else(|| color_eyre::eyre::eyre!("No cell column: {col}"))?;
+
+        Self::set_pixel_in_cell(cell, y, colour_attribute);
 
         Ok(())
     }
@@ -185,10 +192,10 @@ impl Surface {
         let col = x;
         let row = y.div_euclid(2);
         if col >= self.width {
-            bail!("Tried to add pixel to column: {col}")
+            bail!("Tried to add pixel to column: {col}");
         }
         if row >= self.height {
-            bail!("Tried to add pixel to row: {row}")
+            bail!("Tried to add pixel to row: {row}");
         }
         Ok((col, row))
     }

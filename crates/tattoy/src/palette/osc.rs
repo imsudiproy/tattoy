@@ -39,7 +39,9 @@ impl OSC {
                 let palette = super::converter::Palette { map: hashmap };
                 super::main::save(state, &palette).await?;
             }
-            Err(error) => color_eyre::eyre::bail!(error),
+            Err(error) => {
+                color_eyre::eyre::bail!(error);
+            }
         }
 
         Ok(())
