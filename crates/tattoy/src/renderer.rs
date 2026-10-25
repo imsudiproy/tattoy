@@ -110,7 +110,9 @@ impl Renderer {
                 attributes.set_foreground(colour);
                 Ok(termwiz::cell::Cell::new('▀', attributes))
             }
-            Err(()) => color_eyre::eyre::bail!("Couldn't convert indicator cell colour to SRGBA"),
+            Err(()) => {
+                color_eyre::eyre::bail!("Couldn't convert indicator cell colour to SRGBA");
+            }
         }
     }
 
@@ -513,6 +515,9 @@ impl Renderer {
         let animated_cursor_opacity = self.state.config.read().await.animated_cursor.opacity;
 
         for (y, (frame_line, pty_line)) in frame_cells.iter_mut().zip(pty_cells).enumerate() {
+            let shader_line = maybe_shader_cells.as_ref().and_then(|cells| cells.get(y));
+            let cursor_line = maybe_cursor_cells.as_ref().and_then(|cells| cells.get(y));
+
             for (x, (frame_cell, pty_cell)) in frame_line.iter_mut().zip(pty_line).enumerate() {
                 Compositor::composite_cells(frame_cell, pty_cell, 1.0, self.default_bg_colour);
 
@@ -520,25 +525,26 @@ impl Renderer {
                     continue;
                 }
 
-                if let Some(shader_cells) = maybe_shader_cells.as_ref() {
-                    let shader_cell = Compositor::get_cell(shader_cells, x, y)?;
-                    Compositor::composite_fg_colour_only(
-                        frame_cell,
-                        shader_cell,
-                        self.default_bg_colour,
-                    );
+                if let Some(shader_line) = shader_line {
+                    if let Some(shader_cell) = shader_line.get(x) {
+                        Compositor::composite_fg_colour_only(
+                            frame_cell,
+                            shader_cell,
+                            self.default_bg_colour,
+                        );
+                    }
                 }
 
-                if let Some(cursor_cells) = maybe_cursor_cells.as_ref() {
-                    Self::composit_animated_cursor(
-                        cursor_cells,
-                        frame_cell,
-                        x,
-                        y,
-                        pty_cell.str() != " ",
-                        animated_cursor_opacity,
-                        self.default_bg_colour,
-                    )?;
+                if let Some(cursor_line) = cursor_line {
+                    if let Some(cursor_cell) = cursor_line.get(x) {
+                        Self::composit_animated_cursor(
+                            cursor_cell,
+                            frame_cell,
+                            pty_cell.str() != " ",
+                            animated_cursor_opacity,
+                            self.default_bg_colour,
+                        );
+                    }
                 }
 
                 if text_contrast.enabled {
@@ -558,35 +564,30 @@ impl Renderer {
     /// Composite and animated cursor pixel(s). These pixels are special in that they fit between the
     /// foreground and the background of the PTY layer.
     fn composit_animated_cursor(
-        cursor_cells: &'_ [&[termwiz::cell::Cell]],
+        cursor_cell: &termwiz::cell::Cell,
         frame_cell: &mut termwiz::cell::Cell,
-        x: usize,
-        y: usize,
         is_textish: bool,
         opacity: f32,
         default_bg_colour: termwiz::color::SrgbaTuple,
-    ) -> Result<()> {
-        let cursor_cell = Compositor::get_cell(cursor_cells, x, y)?.clone();
+    ) {
         let fg = super::blender::Blender::extract_colour(cursor_cell.attrs().foreground());
         let bg = super::blender::Blender::extract_colour(cursor_cell.attrs().background());
         let is_renderable = fg.is_some() || bg.is_some();
 
         if !is_renderable {
-            return Ok(());
+            return;
         }
 
         if is_textish {
             Compositor::blend_cursor_pixel_into_text(
                 frame_cell,
-                &cursor_cell,
+                cursor_cell,
                 opacity,
                 default_bg_colour,
             );
         } else {
-            Compositor::composite_cells(frame_cell, &cursor_cell, 1.0, default_bg_colour);
+            Compositor::composite_cells(frame_cell, cursor_cell, 1.0, default_bg_colour);
         }
-
-        Ok(())
     }
 
     /// If there's a shader frame then get it.

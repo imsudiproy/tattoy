@@ -1,5 +1,5 @@
 //! Composite individual cells into the final renderablsee frame.
-use color_eyre::eyre::{ContextCompat as _, Result};
+use color_eyre::eyre::Result;
 use shadow_terminal::termwiz;
 
 /// Composite cells together, honouring alpha blending, text and pixels.
@@ -13,29 +13,25 @@ impl Compositor {
         x: usize,
         y: usize,
     ) -> Result<&'cell mut termwiz::cell::Cell> {
-        let x_message = Self::no_coord_error_message("x", x);
-        let y_message = Self::no_coord_error_message("y", y);
         cells
             .get_mut(y)
-            .context(y_message)?
+            .ok_or_else(|| color_eyre::eyre::eyre!("No y coord ({y}) for cell"))?
             .get_mut(x)
-            .context(x_message)
+            .ok_or_else(|| color_eyre::eyre::eyre!("No x coord ({x}) for cell"))
     }
 
     /// Get a reference to a cell.
+    #[allow(dead_code)]
     pub fn get_cell<'cell>(
         cells: &'cell [&[termwiz::cell::Cell]],
         x: usize,
         y: usize,
     ) -> Result<&'cell termwiz::cell::Cell> {
-        let x_message = Self::no_coord_error_message("x", x);
-        let y_message = Self::no_coord_error_message("y", y);
-        cells.get(y).context(y_message)?.get(x).context(x_message)
-    }
-
-    /// The error message when a cell doesn't exist at the provided coordinate.
-    fn no_coord_error_message(axis: &str, coord: usize) -> String {
-        format!("No {axis} coord ({coord}) for cell")
+        cells
+            .get(y)
+            .ok_or_else(|| color_eyre::eyre::eyre!("No y coord ({y}) for cell"))?
+            .get(x)
+            .ok_or_else(|| color_eyre::eyre::eyre!("No x coord ({x}) for cell"))
     }
 
     /// Simply use the incoming cell's foreground colour for the base cell's foreground
