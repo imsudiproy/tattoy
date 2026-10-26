@@ -31,7 +31,7 @@ pub struct Cell {
 pub struct Pixel {
     /// The coordinates of the pixel. [0, 0] is in the top-left. The y-axis is twice as long as the
     /// number of rows in the terminal because 2 "pixels" can fit in a single TTY cell using the
-    /// UTF8 half-block trick: ▀▄▀▄
+    /// UTF8 half-block trick: ▀▄▀▄.
     pub coordinates: (u32, u32),
     /// An optional colour for the pixel. If `None` (or `null` in the case of JSON) is used then
     /// the default foreground colour is used.
